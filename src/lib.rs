@@ -1,12 +1,10 @@
-use wasm_bindgen::prelude::*;
-use rand::Rng;
+use argon2::{Argon2, Params};
+use base64::{self, engine::general_purpose, Engine};
 use blake3;
-use chacha20poly1305::ChaCha20Poly1305;
-use chacha20poly1305::aead::{Aead, NewAead, KeyInit};
-use argon2::{self, Config, Variant, Version};
-use base64;
+use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit};
 use js_sys::Date;
 use num_cpus;
+use wasm_bindgen::prelude::*;
 
 #[derive(Debug)]
 pub enum CryptoError {
@@ -49,7 +47,7 @@ impl SmartHasher {
 
     fn generate_pepper() -> Vec<u8> {
         let timestamp = Date::now() as u128; // Use JS Date for timestamp
-        blake3::hash(×tamp.to_be_bytes()).as_bytes().to_vec()
+        blake3::hash(&timestamp.to_be_bytes()).as_bytes().to_vec()
     }
 
     #[wasm_bindgen]
@@ -61,7 +59,11 @@ impl SmartHasher {
         while Date::now() - start < target_time_ms as f64 {
             temp_memory += 1024;
             let config = self.get_config(temp_memory);
-            let _ = argon2::hash_raw(test_input, &self.generate_salt(), &config);
+            let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, config);
+
+            let out: &[u8] = &[];
+            let _ =
+                argon2.hash_password_into(test_input, &self.generate_salt(), &mut out.to_owned());
         }
 
         self.memory_cost = temp_memory - 1024;
@@ -74,17 +76,8 @@ impl SmartHasher {
         salt
     }
 
-    fn get_config(&self, memory_cost: u32) -> Config {
-        Config {
-            variant: Variant::Argon2id,
-            version: Version::Version13,
-            mem_cost: memory_cost,
-            time_cost: self.iterations,
-            lanes: self.parallelism,
-            secret: &self.pepper,
-            hash_length: self.key_length as u32,
-            ..Default::default()
-        }
+    fn get_config(&self, memory_cost: u32) -> Params {
+        Params::new(memory_cost, self.iterations, self.parallelism, None).unwrap()
     }
 
     #[wasm_bindgen]
@@ -95,17 +88,21 @@ impl SmartHasher {
 
         let salt = self.generate_salt();
         let config = self.get_config(self.memory_cost);
+        let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, config);
 
-        let argon_hash = argon2::hash_raw(password.as_bytes(), &salt, &config)
+        let out: &[u8] = &[];
+        argon2
+            .hash_password_into(password.as_bytes(), &salt, &mut out.to_owned())
             .map_err(|e| CryptoError::HashingError(e.to_string()))?;
 
-        let key = blake3::derive_key("SmartHasher v1", &argon_hash);
+        let key = blake3::derive_key("SmartHasher v1", &out);
         let cipher = ChaCha20Poly1305::new_from_slice(&key)
             .map_err(|e| CryptoError::EncryptionError(e.to_string()))?;
-        
+
         let mut nonce = [0u8; 12];
         getrandom::getrandom(&mut nonce).expect("Failed to generate nonce");
-        let encrypted = cipher.encrypt(&nonce.into(), argon_hash.as_ref())
+        let encrypted = cipher
+            .encrypt(&nonce.into(), out)
             .map_err(|e| CryptoError::EncryptionError(e.to_string()))?;
 
         let mut result = Vec::new();
@@ -113,12 +110,13 @@ impl SmartHasher {
         result.extend_from_slice(&nonce);
         result.extend_from_slice(&encrypted);
 
-        Ok(base64::encode(result))
+        Ok(general_purpose::STANDARD.encode(result))
     }
 
     #[wasm_bindgen]
     pub fn verify(&self, password: String, hash: String) -> Result<bool, JsValue> {
-        let decoded = base64::decode(&hash)
+        let decoded = general_purpose::STANDARD
+            .decode(hash.to_owned())
             .map_err(|e| CryptoError::InvalidInput(e.to_string()))?;
 
         if decoded.len() < self.salt_length + 12 {
@@ -130,27 +128,37 @@ impl SmartHasher {
         let encrypted = &decoded[self.salt_length + 12..];
 
         let config = self.get_config(self.memory_cost);
-        let argon_hash = argon2::hash_raw(password.as_bytes(), salt, &config)
+        let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, config);
+
+        let out: &[u8] = &[];
+        argon2
+            .hash_password_into(password.as_bytes(), &salt, &mut out.to_owned())
             .map_err(|e| CryptoError::HashingError(e.to_string()))?;
 
-        let key = blake3::derive_key("SmartHasher v1", &argon_hash);
+        let key = blake3::derive_key("SmartHasher v1", &out);
         let cipher = ChaCha20Poly1305::new_from_slice(&key)
             .map_err(|e| CryptoError::EncryptionError(e.to_string()))?;
-        
-        let decrypted = cipher.decrypt(nonce.into(), encrypted)
+
+        let decrypted = cipher
+            .decrypt(nonce.into(), encrypted)
             .map_err(|e| CryptoError::EncryptionError(e.to_string()))?;
 
-        Ok(decrypted == argon_hash)
+        Ok(decrypted == out)
     }
 }
 
 // For testing in Rust
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let hasher = SmartHasher::new();
-    let password = "test".to_string();
-    let hash = hasher.hash(password.clone())?;
-    println!("Hash: {}", hash);
-    let verified = hasher.verify(password, hash)?;
-    println!("Verified: {}", verified);
-    Ok(())
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn it_works() {
+        let hasher = SmartHasher::new();
+        let password = "test".to_string();
+        let hash = hasher.hash(password.clone()).unwrap();
+        println!("Hash: {:?}", hash);
+        let verified = hasher.verify(password, hash);
+        println!("Verified: {:?}", verified);
+    }
 }
