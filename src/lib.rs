@@ -77,7 +77,13 @@ impl SmartHasher {
     }
 
     fn get_config(&self, memory_cost: u32) -> Params {
-        Params::new(memory_cost, self.iterations, self.parallelism, None).unwrap()
+        Params::new(
+            memory_cost,
+            self.iterations,
+            self.parallelism,
+            Some(self.key_length),
+        )
+        .unwrap()
     }
 
     #[wasm_bindgen]
