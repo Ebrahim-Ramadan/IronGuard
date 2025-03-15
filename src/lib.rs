@@ -151,8 +151,9 @@ impl SmartHasher {
 #[cfg(test)]
 mod test {
     use super::*;
+    use wasm_bindgen_test::*;
 
-    #[test]
+    #[wasm_bindgen_test]
     fn it_works() {
         let hasher = SmartHasher::new();
         let password = "test".to_string();
