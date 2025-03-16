@@ -33,7 +33,6 @@ pub struct SmartHasher {
 impl SmartHasher {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
-        // Use JS-based random number generation for WASM
         let cpu_count = num_cpus::get() as u32;
         SmartHasher {
             memory_cost: 19456,
@@ -46,8 +45,8 @@ impl SmartHasher {
     }
 
     fn generate_pepper() -> Vec<u8> {
-        let timestamp = Date::now() as u128; // Use JS Date for timestamp
-        blake3::hash(&timestamp.to_be_bytes()).as_bytes().to_vec()
+        let timestamp = Date::now() as u128;
+        blake3::hash(&timestamp.to_be_bytes()).as_bytes().to_vec() // Fixed: &timestamp
     }
 
     #[wasm_bindgen]
@@ -60,10 +59,8 @@ impl SmartHasher {
             temp_memory += 1024;
             let config = self.get_config(temp_memory);
             let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, config);
-
-            let out: &[u8] = &[];
-            let _ =
-                argon2.hash_password_into(test_input, &self.generate_salt(), &mut out.to_owned());
+            let mut out = vec![0u8; self.key_length];
+            let _ = argon2.hash_password_into(test_input, &self.generate_salt(), &mut out);
         }
 
         self.memory_cost = temp_memory - 1024;
@@ -77,13 +74,7 @@ impl SmartHasher {
     }
 
     fn get_config(&self, memory_cost: u32) -> Params {
-        Params::new(
-            memory_cost,
-            self.iterations,
-            self.parallelism,
-            Some(self.key_length),
-        )
-        .unwrap()
+        Params::new(memory_cost, self.iterations, self.parallelism, Some(self.key_length)).unwrap()
     }
 
     #[wasm_bindgen]
@@ -96,9 +87,13 @@ impl SmartHasher {
         let config = self.get_config(self.memory_cost);
         let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, config);
 
-        let out: &[u8] = &[];
+        let mut out = vec![0u8; self.key_length];
         argon2
-            .hash_password_into(password.as_bytes(), &salt, &mut out.to_owned())
+            .hash_password_into(
+                &[password.as_bytes(), &self.pepper].concat(),
+                &salt,
+                &mut out,
+            )
             .map_err(|e| CryptoError::HashingError(e.to_string()))?;
 
         let key = blake3::derive_key("SmartHasher v1", &out);
@@ -108,7 +103,7 @@ impl SmartHasher {
         let mut nonce = [0u8; 12];
         getrandom::getrandom(&mut nonce).expect("Failed to generate nonce");
         let encrypted = cipher
-            .encrypt(&nonce.into(), out)
+            .encrypt(&nonce.into(), &*out) // Fixed previously
             .map_err(|e| CryptoError::EncryptionError(e.to_string()))?;
 
         let mut result = Vec::new();
@@ -136,9 +131,13 @@ impl SmartHasher {
         let config = self.get_config(self.memory_cost);
         let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, config);
 
-        let out: &[u8] = &[];
+        let mut out = vec![0u8; self.key_length];
         argon2
-            .hash_password_into(password.as_bytes(), &salt, &mut out.to_owned())
+            .hash_password_into(
+                &[password.as_bytes(), &self.pepper].concat(),
+                &salt,
+                &mut out,
+            )
             .map_err(|e| CryptoError::HashingError(e.to_string()))?;
 
         let key = blake3::derive_key("SmartHasher v1", &out);
@@ -153,7 +152,6 @@ impl SmartHasher {
     }
 }
 
-// For testing in Rust
 #[cfg(test)]
 mod test {
     use super::*;
@@ -165,7 +163,8 @@ mod test {
         let password = "test".to_string();
         let hash = hasher.hash(password.clone()).unwrap();
         println!("Hash: {:?}", hash);
-        let verified = hasher.verify(password, hash);
+        let verified = hasher.verify(password, hash).unwrap();
         println!("Verified: {:?}", verified);
+        assert!(verified);
     }
 }
